@@ -110,14 +110,20 @@ async def _dispatch(
     if tool == "vid_vid":
         second = await download_media(data["video2_msg"], work_dir, reporter, "Downloading #2")
         return await ops.merge_videos(video_path, second, progress=progress)
-    if tool in {"vid_aud", "swap_audio"}:
+    if tool == "vid_aud":
         audio = await download_media(data["audio_msg"], work_dir, reporter, "Downloading audio")
+        # Keep all of the video's existing streams and append the new audio.
         return await ops.add_audio(
             video_path,
             audio,
-            replace=True,
+            replace=False,
             language=data.get("audio_language"),
             progress=progress,
+        )
+    if tool == "swap_audio":
+        audio = await download_media(data["audio_msg"], work_dir, reporter, "Downloading audio")
+        return await ops.swap_audio(
+            video_path, audio, language=data.get("audio_language"), progress=progress
         )
     if tool == "vid_sub":
         sub = await download_media(data["sub_msg"], work_dir, reporter, "Downloading subtitle")

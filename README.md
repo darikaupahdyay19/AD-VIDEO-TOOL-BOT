@@ -35,10 +35,10 @@ When you send a video, an inline keyboard appears with:
 | **Encode** | H264 / H265 / AV1 / VP9 with Low / Medium / High / Custom CRF presets |
 | **Convert** | MP4 / MKV / AVI / MOV / WEBM |
 | **Multi-Resolution** | Generate 240p / 360p / 480p / 720p / 1080p (returns all files) |
-| **Video + Video** | Merge two videos into one |
-| **Video + Audio** | Add/replace audio track (MP3/AAC/FLAC/M4A), with a language-select step that tags the muxed audio stream |
-| **Video + Subtitle** | Soft-mux a subtitle (SRT/ASS/VTT), with a language-select step that tags the muxed subtitle stream |
-| **Video + Audio + Subtitle** | Add both an audio and a subtitle track, each with its own language-select step |
+| **Video + Video** | Merge two videos into one (keeps every audio track common to both inputs) |
+| **Video + Audio** | Add audio (MP3/AAC/FLAC/M4A) keeping all of the video's existing streams, with a language-select step that tags the new audio stream |
+| **Video + Subtitle** | Soft-mux a subtitle (SRT/ASS/VTT) keeping all existing streams, with a language-select step that tags the new subtitle stream |
+| **Video + Audio + Subtitle** | Add an audio and a subtitle track on top of all existing streams, each with its own language-select step |
 | **IntroSub** | Insert an intro subtitle automatically |
 | **HardSub** | Burn subtitles permanently (FFmpeg `subtitles` filter) |
 | **Remove Subs / Audio** | Strip all subtitle or audio streams |

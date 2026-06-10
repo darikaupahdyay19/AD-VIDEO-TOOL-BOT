@@ -197,21 +197,26 @@ async def merge_videos(
     second: str,
     progress: Optional[ProgressCallback] = None,
 ) -> str:
-    """Concatenate two videos using the concat filter (re-encodes)."""
+    """Concatenate two videos using the concat filter (re-encodes).
+
+    The output keeps one video track plus every audio track common to both
+    inputs (``min`` of the two audio-stream counts), so multi-language audio is
+    preserved. Subtitle streams cannot pass through the concat filter and are
+    therefore not carried over by this tool.
+    """
     output = _with_suffix(first, "_merged", ext="mkv")
-    args = [
-        "-i",
-        first,
-        "-i",
-        second,
-        "-filter_complex",
-        "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
-        "-map",
-        "[v]",
-        "-map",
-        "[a]",
-        output,
-    ]
+    audio_n = min(
+        len(await streams_by_type(first, "audio")),
+        len(await streams_by_type(second, "audio")),
+    )
+    seg0 = "[0:v:0]" + "".join(f"[0:a:{i}]" for i in range(audio_n))
+    seg1 = "[1:v:0]" + "".join(f"[1:a:{i}]" for i in range(audio_n))
+    out_labels = "[v]" + "".join(f"[a{i}]" for i in range(audio_n))
+    filtergraph = f"{seg0}{seg1}concat=n=2:v=1:a={audio_n}{out_labels}"
+    args = ["-i", first, "-i", second, "-filter_complex", filtergraph, "-map", "[v]"]
+    for i in range(audio_n):
+        args += ["-map", f"[a{i}]"]
+    args.append(output)
     duration = await get_duration(first) + await get_duration(second)
     await FFmpegProcessor(progress, stage="Merging").run(args, duration)
     return output
@@ -224,24 +229,35 @@ def _language_metadata(stream: str, language: Optional[str]) -> List[str]:
     return [f"-metadata:s:{stream}", f"language={language}"]
 
 
+# Map every keepable stream of the source video (video, audio, subtitle and
+# attachments). Data streams (e.g. mp4 ``mebx``) are intentionally excluded as
+# they frequently cannot be copied into Matroska and would abort the mux.
+_KEEP_ALL_VIDEO = ["-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?"]
+# Same, but without the source audio (used when replacing the audio track).
+_KEEP_ALL_NO_AUDIO = ["-map", "0:v?", "-map", "0:s?", "-map", "0:t?"]
+
+
 async def add_audio(
     video: str,
     audio: str,
-    replace: bool = True,
+    replace: bool = False,
     language: Optional[str] = None,
     progress: Optional[ProgressCallback] = None,
 ) -> str:
-    """Add or replace the audio track of ``video`` with ``audio``.
+    """Add (or replace) an audio track, copying every other stream verbatim.
 
-    When ``language`` (an ISO 639-2 code) is given, the newly muxed audio
-    stream is tagged with that language.
+    By default (``replace=False``) all of the video's existing streams are
+    preserved and the new audio is appended. With ``replace=True`` the source
+    audio is dropped while video/subtitle/attachment streams are still copied.
+    When ``language`` (an ISO 639-2 code) is given the newly muxed audio stream
+    is tagged with it.
     """
     output = _with_suffix(video, "_audio", ext="mkv")
     if replace:
-        maps = ["-map", "0:v:0", "-map", "1:a:0"]
+        maps = [*_KEEP_ALL_NO_AUDIO, "-map", "1:a?"]
         new_audio_index = 0
     else:
-        maps = ["-map", "0:v", "-map", "0:a?", "-map", "1:a"]
+        maps = [*_KEEP_ALL_VIDEO, "-map", "1:a?"]
         # The appended track sits after any pre-existing audio streams.
         new_audio_index = len(await streams_by_type(video, "audio"))
     args = [
@@ -250,12 +266,9 @@ async def add_audio(
         "-i",
         audio,
         *maps,
-        "-c:v",
+        "-c",
         "copy",
-        "-c:a",
-        "aac",
         *_language_metadata(f"a:{new_audio_index}", language),
-        "-shortest",
         output,
     ]
     duration = await get_duration(video)
@@ -269,7 +282,7 @@ async def swap_audio(
     language: Optional[str] = None,
     progress: Optional[ProgressCallback] = None,
 ) -> str:
-    """Replace the existing audio track (alias of :func:`add_audio`)."""
+    """Replace the existing audio track (keeps every non-audio stream)."""
     return await add_audio(
         video, audio, replace=True, language=language, progress=progress
     )
@@ -281,8 +294,9 @@ async def add_subtitle(
     language: Optional[str] = None,
     progress: Optional[ProgressCallback] = None,
 ) -> str:
-    """Soft-mux a subtitle file into the video as a new subtitle stream.
+    """Soft-mux a subtitle file, copying every existing stream verbatim.
 
+    All of the video's streams are preserved and the subtitle is appended.
     When ``language`` is given, the newly added subtitle stream is tagged with
     that ISO 639-2 language code.
     """
@@ -294,14 +308,11 @@ async def add_subtitle(
         video,
         "-i",
         subtitle,
+        *_KEEP_ALL_VIDEO,
         "-map",
-        "0",
-        "-map",
-        "1",
+        "1:s?",
         "-c",
         "copy",
-        "-c:s",
-        "srt",
         *_language_metadata(f"s:{new_sub_index}", language),
         output,
     ]
@@ -318,13 +329,15 @@ async def add_audio_subtitle(
     subtitle_language: Optional[str] = None,
     progress: Optional[ProgressCallback] = None,
 ) -> str:
-    """Mux both an external audio track and a subtitle file into the video.
+    """Mux an external audio track and subtitle, copying every stream verbatim.
 
-    Only the source video stream is kept, so the new audio and subtitle are the
-    sole streams of their type in the output (``a:0`` / ``s:0``) and can be
+    All of the video's existing streams are preserved; the new audio and
+    subtitle are appended after their respective same-type streams and can be
     tagged with the given ISO 639-2 language codes.
     """
     output = _with_suffix(video, "_audiosub", ext="mkv")
+    new_audio_index = len(await streams_by_type(video, "audio"))
+    new_sub_index = len(await streams_by_type(video, "subtitle"))
     args = [
         "-i",
         video,
@@ -332,21 +345,15 @@ async def add_audio_subtitle(
         audio,
         "-i",
         subtitle,
+        *_KEEP_ALL_VIDEO,
         "-map",
-        "0:v:0",
+        "1:a?",
         "-map",
-        "1:a:0",
-        "-map",
-        "2:s:0",
-        "-c:v",
+        "2:s?",
+        "-c",
         "copy",
-        "-c:a",
-        "aac",
-        "-c:s",
-        "srt",
-        *_language_metadata("a:0", audio_language),
-        *_language_metadata("s:0", subtitle_language),
-        "-shortest",
+        *_language_metadata(f"a:{new_audio_index}", audio_language),
+        *_language_metadata(f"s:{new_sub_index}", subtitle_language),
         output,
     ]
     duration = await get_duration(video)
