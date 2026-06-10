@@ -41,3 +41,13 @@ def test_keyboards_build():
 
     assert video_tools_keyboard().inline_keyboard
     assert encode_codec_keyboard().inline_keyboard
+
+
+def test_language_keyboard_uses_namespace_and_skip():
+    from bot.keyboards import language_keyboard
+
+    markup = language_keyboard("lang_a")
+    datas = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+    assert "lang_a|eng" in datas
+    assert "lang_a|skip" in datas
+    assert "menu|cancel" in datas

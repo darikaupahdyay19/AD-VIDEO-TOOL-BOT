@@ -49,6 +49,25 @@ RESOLUTIONS = {
     "1080p": 1080,
 }
 
+# Selectable stream languages mapped to their ISO 639-2/B codes, used to tag
+# muxed audio/subtitle streams via ``-metadata:s:<stream> language=<code>``.
+LANGUAGES = {
+    "eng": "English",
+    "hin": "Hindi",
+    "spa": "Spanish",
+    "fre": "French",
+    "ger": "German",
+    "jpn": "Japanese",
+    "kor": "Korean",
+    "chi": "Chinese",
+    "ara": "Arabic",
+    "rus": "Russian",
+    "por": "Portuguese",
+    "tam": "Tamil",
+    "tel": "Telugu",
+    "und": "Undefined",
+}
+
 # Overlay position expressions for image watermarks (main=W/H, overlay=w/h).
 OVERLAY_POSITIONS = {
     "top_left": "10:10",
@@ -194,18 +213,33 @@ async def merge_videos(
     return output
 
 
+def _language_metadata(stream: str, language: Optional[str]) -> List[str]:
+    """Build ``-metadata:s:<stream> language=<code>`` args (empty when unset)."""
+    if not language:
+        return []
+    return [f"-metadata:s:{stream}", f"language={language}"]
+
+
 async def add_audio(
     video: str,
     audio: str,
     replace: bool = True,
+    language: Optional[str] = None,
     progress: Optional[ProgressCallback] = None,
 ) -> str:
-    """Add or replace the audio track of ``video`` with ``audio``."""
+    """Add or replace the audio track of ``video`` with ``audio``.
+
+    When ``language`` (an ISO 639-2 code) is given, the newly muxed audio
+    stream is tagged with that language.
+    """
     output = _with_suffix(video, "_audio", ext="mkv")
     if replace:
         maps = ["-map", "0:v:0", "-map", "1:a:0"]
+        new_audio_index = 0
     else:
         maps = ["-map", "0:v", "-map", "0:a?", "-map", "1:a"]
+        # The appended track sits after any pre-existing audio streams.
+        new_audio_index = len(await streams_by_type(video, "audio"))
     args = [
         "-i",
         video,
@@ -216,6 +250,7 @@ async def add_audio(
         "copy",
         "-c:a",
         "aac",
+        *_language_metadata(f"a:{new_audio_index}", language),
         "-shortest",
         output,
     ]
@@ -227,19 +262,29 @@ async def add_audio(
 async def swap_audio(
     video: str,
     audio: str,
+    language: Optional[str] = None,
     progress: Optional[ProgressCallback] = None,
 ) -> str:
     """Replace the existing audio track (alias of :func:`add_audio`)."""
-    return await add_audio(video, audio, replace=True, progress=progress)
+    return await add_audio(
+        video, audio, replace=True, language=language, progress=progress
+    )
 
 
 async def add_subtitle(
     video: str,
     subtitle: str,
+    language: Optional[str] = None,
     progress: Optional[ProgressCallback] = None,
 ) -> str:
-    """Soft-mux a subtitle file into the video as a new subtitle stream."""
+    """Soft-mux a subtitle file into the video as a new subtitle stream.
+
+    When ``language`` is given, the newly added subtitle stream is tagged with
+    that ISO 639-2 language code.
+    """
     output = _with_suffix(video, "_subbed", ext="mkv")
+    # The new subtitle is appended after any subtitle streams already present.
+    new_sub_index = len(await streams_by_type(video, "subtitle"))
     args = [
         "-i",
         video,
@@ -253,6 +298,7 @@ async def add_subtitle(
         "copy",
         "-c:s",
         "srt",
+        *_language_metadata(f"s:{new_sub_index}", language),
         output,
     ]
     duration = await get_duration(video)
@@ -264,9 +310,16 @@ async def add_audio_subtitle(
     video: str,
     audio: str,
     subtitle: str,
+    audio_language: Optional[str] = None,
+    subtitle_language: Optional[str] = None,
     progress: Optional[ProgressCallback] = None,
 ) -> str:
-    """Mux both an external audio track and a subtitle file into the video."""
+    """Mux both an external audio track and a subtitle file into the video.
+
+    Only the source video stream is kept, so the new audio and subtitle are the
+    sole streams of their type in the output (``a:0`` / ``s:0``) and can be
+    tagged with the given ISO 639-2 language codes.
+    """
     output = _with_suffix(video, "_audiosub", ext="mkv")
     args = [
         "-i",
@@ -287,6 +340,8 @@ async def add_audio_subtitle(
         "aac",
         "-c:s",
         "srt",
+        *_language_metadata("a:0", audio_language),
+        *_language_metadata("s:0", subtitle_language),
         "-shortest",
         output,
     ]

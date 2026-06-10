@@ -306,6 +306,34 @@ async def _wm_op(client, query, parts) -> None:
     await query.answer()
 
 
+async def _lang_audio(client, query, parts) -> None:
+    state = _require_state(query)
+    if state is None:
+        await query.answer("Session expired.", show_alert=True)
+        return
+    value = parts[1]
+    state.data["audio_language"] = None if value == "skip" else value
+    # Video + Audio + Subtitle still needs the subtitle file next.
+    if state.tool == "vid_aud_sub":
+        state.awaiting = "subtitle"
+        await query.message.edit_text("💬 Now send the **subtitle** file (SRT/ASS/VTT).")
+        await query.answer()
+        return
+    await _start_processing(client, query, state)
+    await query.answer()
+
+
+async def _lang_sub(client, query, parts) -> None:
+    state = _require_state(query)
+    if state is None:
+        await query.answer("Session expired.", show_alert=True)
+        return
+    value = parts[1]
+    state.data["subtitle_language"] = None if value == "skip" else value
+    await _start_processing(client, query, state)
+    await query.answer()
+
+
 async def _task_cancel(client, query, parts) -> None:
     task_id = parts[1]
     cancelled = await queue.cancel(task_id, user_id=query.from_user.id)
@@ -347,6 +375,8 @@ _ROUTES = {
     "wm_type": _wm_type,
     "wm_pos": _wm_pos,
     "wm_op": _wm_op,
+    "lang_a": _lang_audio,
+    "lang_s": _lang_sub,
     "task_cancel": _task_cancel,
     "set": _settings,
 }

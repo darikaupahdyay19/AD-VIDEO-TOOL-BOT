@@ -10,7 +10,11 @@ from bot.database import db
 from bot.handlers.tools import run_tool
 from bot.helpers.files import within_size_limit
 from bot.helpers.formatting import human_bytes
-from bot.keyboards import video_tools_keyboard, watermark_position_keyboard
+from bot.keyboards import (
+    language_keyboard,
+    video_tools_keyboard,
+    watermark_position_keyboard,
+)
 from bot.plugins.guards import passes_guards
 from bot.utils.logger import get_logger
 from bot.utils.state import state_store
@@ -82,12 +86,23 @@ async def _collect_input(client: Client, message: Message, state) -> None:
         state.data["video2_msg"] = message
     elif awaiting == "audio":
         state.data["audio_msg"] = message
-        if state.tool == "vid_aud_sub":
-            state.awaiting = "subtitle"
-            await message.reply_text("💬 Now send the **subtitle** file (SRT/ASS/VTT).")
+        if state.tool in {"vid_aud", "vid_aud_sub"}:
+            # Let the user tag the muxed audio stream with a language.
+            state.awaiting = None
+            await message.reply_text(
+                "🌐 Select the **audio** track language:",
+                reply_markup=language_keyboard("lang_a"),
+            )
             return
     elif awaiting == "subtitle":
         state.data["sub_msg"] = message
+        if state.tool in {"vid_sub", "vid_aud_sub"}:
+            state.awaiting = None
+            await message.reply_text(
+                "🌐 Select the **subtitle** track language:",
+                reply_markup=language_keyboard("lang_s"),
+            )
+            return
     elif awaiting == "watermark_image":
         state.data["wm_msg"] = message
         state.awaiting = None

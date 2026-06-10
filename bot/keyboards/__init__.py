@@ -11,6 +11,8 @@ from typing import Iterable, List, Sequence, Tuple
 
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from bot.ffmpeg.operations import LANGUAGES
+
 # Ordered list of the tools shown when a video is received. Each entry is
 # ``(label, tool_id)``; ``tool_id`` is embedded in the callback data.
 VIDEO_TOOLS: List[Tuple[str, str]] = [
@@ -193,6 +195,24 @@ def watermark_position_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def language_keyboard(namespace: str) -> InlineKeyboardMarkup:
+    """Stream-language selector for muxed audio/subtitle tracks.
+
+    ``namespace`` is the callback namespace to dispatch on (e.g. ``"lang_a"``
+    for audio or ``"lang_s"`` for subtitle). A ``Skip`` option (value
+    ``"skip"``) leaves the stream untagged.
+    """
+    options = [(name, code) for code, name in LANGUAGES.items()]
+    options.append(("⏭ Skip", "skip"))
+    buttons = [
+        InlineKeyboardButton(label, callback_data=f"{namespace}|{value}")
+        for label, value in options
+    ]
+    rows = _grid(buttons, 3)
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="menu|cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
 def watermark_opacity_keyboard() -> InlineKeyboardMarkup:
     return _options_keyboard(
         "wm_op",
@@ -234,6 +254,7 @@ __all__ = [
     "extract_subs_keyboard",
     "audio_format_keyboard",
     "subtitle_format_keyboard",
+    "language_keyboard",
     "watermark_type_keyboard",
     "watermark_position_keyboard",
     "watermark_opacity_keyboard",

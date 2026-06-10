@@ -112,14 +112,29 @@ async def _dispatch(
         return await ops.merge_videos(video_path, second, progress=progress)
     if tool in {"vid_aud", "swap_audio"}:
         audio = await download_media(data["audio_msg"], work_dir, reporter, "Downloading audio")
-        return await ops.add_audio(video_path, audio, replace=True, progress=progress)
+        return await ops.add_audio(
+            video_path,
+            audio,
+            replace=True,
+            language=data.get("audio_language"),
+            progress=progress,
+        )
     if tool == "vid_sub":
         sub = await download_media(data["sub_msg"], work_dir, reporter, "Downloading subtitle")
-        return await ops.add_subtitle(video_path, sub, progress=progress)
+        return await ops.add_subtitle(
+            video_path, sub, language=data.get("subtitle_language"), progress=progress
+        )
     if tool == "vid_aud_sub":
         audio = await download_media(data["audio_msg"], work_dir, reporter, "Downloading audio")
         sub = await download_media(data["sub_msg"], work_dir, reporter, "Downloading subtitle")
-        return await ops.add_audio_subtitle(video_path, audio, sub, progress=progress)
+        return await ops.add_audio_subtitle(
+            video_path,
+            audio,
+            sub,
+            audio_language=data.get("audio_language"),
+            subtitle_language=data.get("subtitle_language"),
+            progress=progress,
+        )
     if tool == "hardsub":
         sub = await download_media(data["sub_msg"], work_dir, reporter, "Downloading subtitle")
         return await ops.hardsub(video_path, sub, progress=progress)
