@@ -94,10 +94,52 @@ async def streams_by_type(path: str, codec_type: str) -> List[StreamInfo]:
     return [s for s in await get_streams(path) if s.codec_type == codec_type]
 
 
+@dataclass
+class VideoMeta:
+    """Video attributes Telegram needs to render a proper preview."""
+
+    duration: int = 0
+    width: int = 0
+    height: int = 0
+
+
+async def get_video_meta(path: str) -> VideoMeta:
+    """Return ``(duration, width, height)`` for the first video stream.
+
+    Values default to ``0`` when they cannot be determined, which Pyrogram
+    tolerates.  Telegram uses them to show the correct length and aspect ratio
+    instead of a ``0:00`` placeholder.
+    """
+    data = await probe(path)
+    duration = 0.0
+    try:
+        duration = float(data.get("format", {}).get("duration", 0.0))
+    except (TypeError, ValueError):
+        duration = 0.0
+    width = height = 0
+    for raw in data.get("streams", []):
+        if raw.get("codec_type") == "video":
+            try:
+                width = int(raw.get("width", 0) or 0)
+                height = int(raw.get("height", 0) or 0)
+            except (TypeError, ValueError):
+                width = height = 0
+            # Fall back to the stream duration when the container lacks one.
+            if duration <= 0:
+                try:
+                    duration = float(raw.get("duration", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    duration = 0.0
+            break
+    return VideoMeta(duration=int(round(duration)), width=width, height=height)
+
+
 __all__ = [
     "StreamInfo",
+    "VideoMeta",
     "probe",
     "get_duration",
     "get_streams",
     "streams_by_type",
+    "get_video_meta",
 ]

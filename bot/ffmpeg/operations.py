@@ -9,11 +9,15 @@ and reusable.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import List, Optional
 
-from bot.ffmpeg.probe import get_duration, streams_by_type
+from bot.ffmpeg.probe import get_duration, get_video_meta, streams_by_type
 from bot.ffmpeg.processor import FFmpegProcessor, ProgressCallback
+from bot.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Lookup tables
@@ -563,11 +567,55 @@ async def watermark_text(
     return output
 
 
+async def generate_thumbnail(video: str) -> Optional[str]:
+    """Extract a single JPEG frame to use as a Telegram video thumbnail.
+
+    Returns the thumbnail path, or ``None`` if extraction fails. The frame is
+    grabbed a couple of seconds in (falling back to the first frame for very
+    short clips) and scaled down to keep it within Telegram's thumb limits.
+    """
+    thumb = _with_suffix(video, "_thumb", ext="jpg")
+    meta = await get_video_meta(video)
+    seek = "2" if meta.duration and meta.duration > 3 else "0"
+    args = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-ss",
+        seek,
+        "-i",
+        video,
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale='min(320,iw)':-2",
+        thumb,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode == 0 and os.path.exists(thumb) and os.path.getsize(thumb):
+            return thumb
+        logger.warning(
+            "Thumbnail generation failed: %s", stderr.decode(errors="ignore")
+        )
+    except Exception as exc:  # never let a thumbnail failure break the upload
+        logger.warning("Thumbnail generation error: %s", exc)
+    return None
+
+
 __all__ = [
     "VIDEO_CODECS",
     "QUALITY_CRF",
     "AUDIO_CODECS",
     "RESOLUTIONS",
+    "generate_thumbnail",
     "encode",
     "convert",
     "multi_resolution",

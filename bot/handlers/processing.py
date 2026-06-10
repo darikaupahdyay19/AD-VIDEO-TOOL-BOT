@@ -19,6 +19,8 @@ from pyrogram.types import Message
 
 from bot.config import Config
 from bot.database import db
+from bot.ffmpeg.operations import generate_thumbnail
+from bot.ffmpeg.probe import get_video_meta
 from bot.helpers.files import cleanup, file_size, within_size_limit
 from bot.helpers.formatting import human_bytes
 from bot.helpers.progress import ProgressReporter
@@ -180,10 +182,20 @@ async def _upload(
             progress=reporter.transfer, progress_args=progress_args,
         )
     elif ext in {".mp4", ".mkv", ".mov", ".webm", ".avi"}:
-        await client.send_video(
-            chat_id, path, caption=caption,
-            progress=reporter.transfer, progress_args=progress_args,
-        )
+        # Supply duration/dimensions/thumbnail so Telegram shows a real preview
+        # instead of a 0:00, thumbnail-less placeholder (common for MKV).
+        meta = await get_video_meta(path)
+        thumb = await generate_thumbnail(path)
+        try:
+            await client.send_video(
+                chat_id, path, caption=caption,
+                duration=meta.duration, width=meta.width, height=meta.height,
+                thumb=thumb,
+                progress=reporter.transfer, progress_args=progress_args,
+            )
+        finally:
+            if thumb and os.path.exists(thumb):
+                os.remove(thumb)
     elif ext in {".mp3", ".aac", ".flac", ".wav", ".m4a"}:
         await client.send_audio(
             chat_id, path, caption=caption,
