@@ -1,0 +1,535 @@
+"""High level FFmpeg operations backing the bot's video tools.
+
+Every public coroutine in this module builds an FFmpeg argument list, runs it
+through :class:`~bot.ffmpeg.processor.FFmpegProcessor` and returns the path(s) of
+the produced file(s).  The functions are intentionally pure with respect to
+Telegram – they only deal with files on disk – which keeps them unit-testable
+and reusable.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import List, Optional
+
+from bot.ffmpeg.probe import get_duration, streams_by_type
+from bot.ffmpeg.processor import FFmpegProcessor, ProgressCallback
+
+# --------------------------------------------------------------------------- #
+# Lookup tables
+# --------------------------------------------------------------------------- #
+
+VIDEO_CODECS = {
+    "h264": "libx264",
+    "h265": "libx265",
+    "av1": "libaom-av1",
+    "vp9": "libvpx-vp9",
+}
+
+# Quality preset -> Constant Rate Factor. ``custom`` is handled separately.
+QUALITY_CRF = {
+    "low": 28,
+    "medium": 23,
+    "high": 18,
+}
+
+AUDIO_CODECS = {
+    "mp3": "libmp3lame",
+    "aac": "aac",
+    "flac": "flac",
+    "m4a": "aac",
+    "wav": "pcm_s16le",
+}
+
+RESOLUTIONS = {
+    "240p": 240,
+    "360p": 360,
+    "480p": 480,
+    "720p": 720,
+    "1080p": 1080,
+}
+
+# Overlay position expressions for image watermarks (main=W/H, overlay=w/h).
+OVERLAY_POSITIONS = {
+    "top_left": "10:10",
+    "top_right": "W-w-10:10",
+    "bottom_left": "10:H-h-10",
+    "bottom_right": "W-w-10:H-h-10",
+    "center": "(W-w)/2:(H-h)/2",
+}
+
+# drawtext position expressions for text watermarks (tw/th = text dimensions).
+TEXT_POSITIONS = {
+    "top_left": "10:10",
+    "top_right": "w-tw-10:10",
+    "bottom_left": "10:h-th-10",
+    "bottom_right": "w-tw-10:h-th-10",
+    "center": "(w-tw)/2:(h-th)/2",
+}
+
+
+def _with_suffix(path: str, suffix: str, ext: Optional[str] = None) -> str:
+    """Return a sibling path with ``suffix`` appended to the stem."""
+    directory = os.path.dirname(path)
+    stem, original_ext = os.path.splitext(os.path.basename(path))
+    new_ext = f".{ext.lstrip('.')}" if ext else original_ext
+    return os.path.join(directory, f"{stem}{suffix}{new_ext}")
+
+
+# --------------------------------------------------------------------------- #
+# Encoding / conversion
+# --------------------------------------------------------------------------- #
+
+async def encode(
+    input_path: str,
+    codec: str = "h264",
+    quality: str = "medium",
+    crf: Optional[int] = None,
+    preset: str = "medium",
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Re-encode ``input_path`` with the requested codec and quality."""
+    vcodec = VIDEO_CODECS.get(codec.lower(), "libx264")
+    if crf is None:
+        crf = QUALITY_CRF.get(quality.lower(), 23)
+
+    output = _with_suffix(input_path, f"_{codec.lower()}")
+    args = [
+        "-i",
+        input_path,
+        "-c:v",
+        vcodec,
+        "-crf",
+        str(crf),
+        "-preset",
+        preset,
+        "-c:a",
+        "copy",
+        output,
+    ]
+    duration = await get_duration(input_path)
+    await FFmpegProcessor(progress, stage="Encoding").run(args, duration)
+    return output
+
+
+async def convert(
+    input_path: str,
+    target_format: str,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Remux/convert ``input_path`` into ``target_format`` (mp4/mkv/avi/...)."""
+    output = _with_suffix(input_path, "_converted", ext=target_format)
+    # Stream copy where possible; fall back to re-encoding handled by FFmpeg.
+    args = ["-i", input_path, "-c", "copy", output]
+    duration = await get_duration(input_path)
+    processor = FFmpegProcessor(progress, stage="Converting")
+    try:
+        await processor.run(args, duration)
+    except Exception:
+        # Container may not support stream copy – re-encode as a fallback.
+        args = ["-i", input_path, output]
+        await FFmpegProcessor(progress, stage="Converting").run(args, duration)
+    return output
+
+
+async def multi_resolution(
+    input_path: str,
+    resolutions: List[str],
+    progress: Optional[ProgressCallback] = None,
+) -> List[str]:
+    """Generate one output per requested resolution and return their paths."""
+    outputs: List[str] = []
+    duration = await get_duration(input_path)
+    for res in resolutions:
+        height = RESOLUTIONS.get(res)
+        if not height:
+            continue
+        output = _with_suffix(input_path, f"_{res}")
+        args = [
+            "-i",
+            input_path,
+            "-vf",
+            f"scale=-2:{height}",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "23",
+            "-preset",
+            "medium",
+            "-c:a",
+            "copy",
+            output,
+        ]
+        await FFmpegProcessor(progress, stage=f"Encoding {res}").run(args, duration)
+        outputs.append(output)
+    return outputs
+
+
+# --------------------------------------------------------------------------- #
+# Merging / muxing
+# --------------------------------------------------------------------------- #
+
+async def merge_videos(
+    first: str,
+    second: str,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Concatenate two videos using the concat filter (re-encodes)."""
+    output = _with_suffix(first, "_merged", ext="mkv")
+    args = [
+        "-i",
+        first,
+        "-i",
+        second,
+        "-filter_complex",
+        "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
+        output,
+    ]
+    duration = await get_duration(first) + await get_duration(second)
+    await FFmpegProcessor(progress, stage="Merging").run(args, duration)
+    return output
+
+
+async def add_audio(
+    video: str,
+    audio: str,
+    replace: bool = True,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Add or replace the audio track of ``video`` with ``audio``."""
+    output = _with_suffix(video, "_audio", ext="mkv")
+    if replace:
+        maps = ["-map", "0:v:0", "-map", "1:a:0"]
+    else:
+        maps = ["-map", "0:v", "-map", "0:a?", "-map", "1:a"]
+    args = [
+        "-i",
+        video,
+        "-i",
+        audio,
+        *maps,
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-shortest",
+        output,
+    ]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Muxing audio").run(args, duration)
+    return output
+
+
+async def swap_audio(
+    video: str,
+    audio: str,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Replace the existing audio track (alias of :func:`add_audio`)."""
+    return await add_audio(video, audio, replace=True, progress=progress)
+
+
+async def add_subtitle(
+    video: str,
+    subtitle: str,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Soft-mux a subtitle file into the video as a new subtitle stream."""
+    output = _with_suffix(video, "_subbed", ext="mkv")
+    args = [
+        "-i",
+        video,
+        "-i",
+        subtitle,
+        "-map",
+        "0",
+        "-map",
+        "1",
+        "-c",
+        "copy",
+        "-c:s",
+        "srt",
+        output,
+    ]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Muxing subtitle").run(args, duration)
+    return output
+
+
+async def add_audio_subtitle(
+    video: str,
+    audio: str,
+    subtitle: str,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Mux both an external audio track and a subtitle file into the video."""
+    output = _with_suffix(video, "_audiosub", ext="mkv")
+    args = [
+        "-i",
+        video,
+        "-i",
+        audio,
+        "-i",
+        subtitle,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-map",
+        "2:s:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-c:s",
+        "srt",
+        "-shortest",
+        output,
+    ]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Muxing A+S").run(args, duration)
+    return output
+
+
+async def intro_sub(
+    video: str,
+    text: str = "Subtitles by Video Tool Bot",
+    duration_seconds: int = 5,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Insert an intro subtitle shown for the first ``duration_seconds``.
+
+    A small SRT file is generated on the fly and soft-muxed into the video so
+    the intro can be toggled by the player.
+    """
+    srt_path = _with_suffix(video, "_intro", ext="srt")
+    with open(srt_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            "1\n00:00:00,000 --> "
+            f"00:00:{duration_seconds:02d},000\n{text}\n"
+        )
+    try:
+        return await add_subtitle(video, srt_path, progress=progress)
+    finally:
+        if os.path.exists(srt_path):
+            os.remove(srt_path)
+
+
+async def hardsub(
+    video: str,
+    subtitle: str,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Burn ``subtitle`` permanently into the video using the subtitles filter."""
+    output = _with_suffix(video, "_hardsub", ext="mp4")
+    # Escape characters that are special to the lavfi filtergraph parser.
+    escaped = subtitle.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    args = [
+        "-i",
+        video,
+        "-vf",
+        f"subtitles='{escaped}'",
+        "-c:a",
+        "copy",
+        output,
+    ]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Burning subtitles").run(args, duration)
+    return output
+
+
+# --------------------------------------------------------------------------- #
+# Stream removal / metadata
+# --------------------------------------------------------------------------- #
+
+async def remove_subs(
+    video: str,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Drop all subtitle streams while copying everything else."""
+    output = _with_suffix(video, "_nosubs")
+    args = ["-i", video, "-map", "0", "-map", "-0:s", "-c", "copy", output]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Removing subtitles").run(args, duration)
+    return output
+
+
+async def remove_audio(
+    video: str,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Drop all audio streams."""
+    output = _with_suffix(video, "_noaudio")
+    args = ["-i", video, "-map", "0", "-map", "-0:a", "-c", "copy", output]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Removing audio").run(args, duration)
+    return output
+
+
+async def remove_streams(
+    video: str,
+    stream_types: List[str],
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Remove the given stream types (``audio``/``subtitle``/``data``/...)."""
+    type_to_specifier = {
+        "audio": "a",
+        "subtitle": "s",
+        "data": "d",
+        "attachment": "t",
+    }
+    output = _with_suffix(video, "_stripped")
+    args = ["-i", video, "-map", "0"]
+    for stream_type in stream_types:
+        specifier = type_to_specifier.get(stream_type.lower())
+        if specifier:
+            args += ["-map", f"-0:{specifier}"]
+    args += ["-c", "copy", output]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Removing streams").run(args, duration)
+    return output
+
+
+async def strip_metadata(
+    video: str,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Remove all global and per-stream metadata (``-map_metadata -1``)."""
+    output = _with_suffix(video, "_nometa")
+    args = [
+        "-i",
+        video,
+        "-map",
+        "0",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+        "-c",
+        "copy",
+        output,
+    ]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Stripping metadata").run(args, duration)
+    return output
+
+
+# --------------------------------------------------------------------------- #
+# Extraction
+# --------------------------------------------------------------------------- #
+
+async def extract_audio(
+    video: str,
+    target_format: str = "mp3",
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Extract the first audio track into ``target_format``."""
+    codec = AUDIO_CODECS.get(target_format.lower(), "libmp3lame")
+    output = _with_suffix(video, "_audio", ext=target_format)
+    args = ["-i", video, "-vn", "-map", "0:a:0", "-c:a", codec, output]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Extracting audio").run(args, duration)
+    return output
+
+
+async def extract_subs(
+    video: str,
+    target_format: str = "srt",
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Extract the first subtitle track into ``target_format`` (srt/ass/vtt)."""
+    output = _with_suffix(video, "_subs", ext=target_format)
+    args = ["-i", video, "-map", "0:s:0", output]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Extracting subtitles").run(args, duration)
+    return output
+
+
+# --------------------------------------------------------------------------- #
+# Watermarking
+# --------------------------------------------------------------------------- #
+
+async def watermark_image(
+    video: str,
+    image: str,
+    position: str = "bottom_right",
+    opacity: float = 0.7,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Overlay an image watermark at ``position`` with the given ``opacity``."""
+    output = _with_suffix(video, "_wm", ext="mp4")
+    overlay_xy = OVERLAY_POSITIONS.get(position, OVERLAY_POSITIONS["bottom_right"])
+    opacity = max(0.0, min(1.0, opacity))
+    filtergraph = (
+        f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[wm];"
+        f"[0:v][wm]overlay={overlay_xy}"
+    )
+    args = [
+        "-i",
+        video,
+        "-i",
+        image,
+        "-filter_complex",
+        filtergraph,
+        "-c:a",
+        "copy",
+        output,
+    ]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Watermarking").run(args, duration)
+    return output
+
+
+async def watermark_text(
+    video: str,
+    text: str,
+    position: str = "bottom_right",
+    opacity: float = 0.7,
+    progress: Optional[ProgressCallback] = None,
+) -> str:
+    """Draw a text watermark at ``position`` with the given ``opacity``."""
+    output = _with_suffix(video, "_wmtext", ext="mp4")
+    text_xy = TEXT_POSITIONS.get(position, TEXT_POSITIONS["bottom_right"])
+    x_expr, _, y_expr = text_xy.partition(":")
+    opacity = max(0.0, min(1.0, opacity))
+    safe_text = text.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\u2019")
+    drawtext = (
+        f"drawtext=text='{safe_text}':x={x_expr}:y={y_expr}:"
+        f"fontsize=24:fontcolor=white@{opacity}:"
+        "box=1:boxcolor=black@0.4:boxborderw=8"
+    )
+    args = ["-i", video, "-vf", drawtext, "-c:a", "copy", output]
+    duration = await get_duration(video)
+    await FFmpegProcessor(progress, stage="Watermarking").run(args, duration)
+    return output
+
+
+__all__ = [
+    "VIDEO_CODECS",
+    "QUALITY_CRF",
+    "AUDIO_CODECS",
+    "RESOLUTIONS",
+    "encode",
+    "convert",
+    "multi_resolution",
+    "merge_videos",
+    "add_audio",
+    "swap_audio",
+    "add_subtitle",
+    "add_audio_subtitle",
+    "intro_sub",
+    "hardsub",
+    "remove_subs",
+    "remove_audio",
+    "remove_streams",
+    "strip_metadata",
+    "extract_audio",
+    "extract_subs",
+    "watermark_image",
+    "watermark_text",
+    "streams_by_type",
+]

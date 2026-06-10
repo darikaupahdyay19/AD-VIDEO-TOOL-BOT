@@ -1,0 +1,22 @@
+services:
+  bot:
+    build: .
+    container_name: video-tool-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGO_URI: mongodb://mongo:27017
+    depends_on:
+      - mongo
+    volumes:
+      - ./downloads:/app/downloads
+
+  mongo:
+    image: mongo:7
+    container_name: video-tool-bot-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:
