@@ -237,13 +237,29 @@ _KEEP_ALL_VIDEO = ["-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?
 _KEEP_ALL_NO_AUDIO = ["-map", "0:v?", "-map", "0:s?", "-map", "0:t?"]
 
 
-def _added_audio_codec(output_audio_index: int) -> List[str]:
-    """Re-encode the appended audio to AAC while leaving other streams copied.
+# Audio codecs that remux cleanly into Matroska, i.e. can be copied without
+# the gapless-playback/timestamp glitches that plague MP3-in-MKV.
+_COPYABLE_AUDIO = {
+    "aac", "ac3", "eac3", "flac", "opus", "vorbis", "alac", "dts", "truehd", "mp2",
+}
 
-    Stream-copying an external MP3/VBR track straight into Matroska causes
-    gapless-playback/timestamp glitches (dropouts and silent sections), so the
-    newly added audio is always re-encoded to a clean CBR AAC track.
+
+async def _audio_codec_name(audio: str) -> str:
+    """Return the codec of the first audio stream in ``audio`` (``""`` if none)."""
+    streams = await streams_by_type(audio, "audio")
+    return streams[0].codec_name if streams else ""
+
+
+def _added_audio_codec(output_audio_index: int, source_codec: str) -> List[str]:
+    """Codec args for the appended audio: copy when safe, re-encode MP3.
+
+    Stream-copying an MP3 track into Matroska causes gapless/timestamp glitches
+    (dropouts and silent sections), so MP3 (and anything not known to remux
+    cleanly) is re-encoded to AAC. Everything else is copied verbatim, giving a
+    true remux with no quality loss.
     """
+    if source_codec in _COPYABLE_AUDIO:
+        return [f"-c:a:{output_audio_index}", "copy"]
     return [
         f"-c:a:{output_audio_index}",
         "aac",
@@ -275,6 +291,7 @@ async def add_audio(
         maps = [*_KEEP_ALL_VIDEO, "-map", "1:a?"]
         # The appended track sits after any pre-existing audio streams.
         new_audio_index = len(await streams_by_type(video, "audio"))
+    src_codec = await _audio_codec_name(audio)
     args = [
         "-i",
         video,
@@ -283,7 +300,7 @@ async def add_audio(
         *maps,
         "-c",
         "copy",
-        *_added_audio_codec(new_audio_index),
+        *_added_audio_codec(new_audio_index, src_codec),
         *_language_metadata(f"a:{new_audio_index}", language),
         output,
     ]
@@ -354,6 +371,7 @@ async def add_audio_subtitle(
     output = _with_suffix(video, "_audiosub", ext="mkv")
     new_audio_index = len(await streams_by_type(video, "audio"))
     new_sub_index = len(await streams_by_type(video, "subtitle"))
+    src_codec = await _audio_codec_name(audio)
     args = [
         "-i",
         video,
@@ -368,7 +386,7 @@ async def add_audio_subtitle(
         "2:s?",
         "-c",
         "copy",
-        *_added_audio_codec(new_audio_index),
+        *_added_audio_codec(new_audio_index, src_codec),
         *_language_metadata(f"a:{new_audio_index}", audio_language),
         *_language_metadata(f"s:{new_sub_index}", subtitle_language),
         output,

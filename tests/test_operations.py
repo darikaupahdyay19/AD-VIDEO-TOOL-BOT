@@ -1,7 +1,11 @@
 """Tests for FFmpeg operation helpers that do not require FFmpeg itself."""
 
 from bot.ffmpeg import operations as ops
-from bot.ffmpeg.operations import _language_metadata, _with_suffix
+from bot.ffmpeg.operations import (
+    _added_audio_codec,
+    _language_metadata,
+    _with_suffix,
+)
 
 
 def test_with_suffix_keeps_extension():
@@ -41,3 +45,16 @@ def test_language_metadata_builds_args():
 def test_language_metadata_empty_when_unset():
     assert _language_metadata("a:0", None) == []
     assert _language_metadata("a:0", "") == []
+
+
+def test_added_audio_codec_copies_safe_codecs():
+    # AAC/M4A/FLAC etc. remux cleanly -> copied, no encoding.
+    assert _added_audio_codec(1, "aac") == ["-c:a:1", "copy"]
+    assert _added_audio_codec(0, "flac") == ["-c:a:0", "copy"]
+    assert _added_audio_codec(2, "opus") == ["-c:a:2", "copy"]
+
+
+def test_added_audio_codec_reencodes_mp3_and_unknown():
+    # MP3 (and unknown) is re-encoded to AAC to avoid MKV gapless glitches.
+    assert _added_audio_codec(1, "mp3") == ["-c:a:1", "aac", "-b:a:1", "192k"]
+    assert _added_audio_codec(0, "") == ["-c:a:0", "aac", "-b:a:0", "192k"]
