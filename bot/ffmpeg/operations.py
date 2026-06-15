@@ -237,6 +237,21 @@ _KEEP_ALL_VIDEO = ["-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?
 _KEEP_ALL_NO_AUDIO = ["-map", "0:v?", "-map", "0:s?", "-map", "0:t?"]
 
 
+def _added_audio_codec(output_audio_index: int) -> List[str]:
+    """Re-encode the appended audio to AAC while leaving other streams copied.
+
+    Stream-copying an external MP3/VBR track straight into Matroska causes
+    gapless-playback/timestamp glitches (dropouts and silent sections), so the
+    newly added audio is always re-encoded to a clean CBR AAC track.
+    """
+    return [
+        f"-c:a:{output_audio_index}",
+        "aac",
+        f"-b:a:{output_audio_index}",
+        "192k",
+    ]
+
+
 async def add_audio(
     video: str,
     audio: str,
@@ -268,6 +283,7 @@ async def add_audio(
         *maps,
         "-c",
         "copy",
+        *_added_audio_codec(new_audio_index),
         *_language_metadata(f"a:{new_audio_index}", language),
         output,
     ]
@@ -352,6 +368,7 @@ async def add_audio_subtitle(
         "2:s?",
         "-c",
         "copy",
+        *_added_audio_codec(new_audio_index),
         *_language_metadata(f"a:{new_audio_index}", audio_language),
         *_language_metadata(f"s:{new_sub_index}", subtitle_language),
         output,
