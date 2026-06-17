@@ -67,10 +67,13 @@ class TaskQueue:
 
     async def stop(self) -> None:
         """Cancel all workers and running tasks."""
+        # Set _started = False BEFORE cancelling so that workers can detect
+        # shutdown in their CancelledError handler and propagate the exception,
+        # allowing the while-loop to exit cleanly.
+        self._started = False
         for worker in self._workers:
             worker.cancel()
         self._workers.clear()
-        self._started = False
 
     # ------------------------------------------------------------- scheduling
     def user_task_count(self, user_id: int) -> int:
@@ -159,6 +162,12 @@ class TaskQueue:
             except asyncio.CancelledError:
                 task.status = "cancelled"
                 logger.info("Task %s cancelled", task.task_id)
+                # If the queue itself is shutting down (_started is False), the
+                # CancelledError was injected into the worker by stop().  Re-raise
+                # it so the while-loop exits; otherwise swallow it (user-initiated
+                # task cancellation should not kill the worker).
+                if not self._started:
+                    raise
             except Exception as exc:
                 task.status = "failed"
                 logger.exception("Task %s failed: %s", task.task_id, exc)
