@@ -90,6 +90,16 @@ TEXT_POSITIONS = {
     "center": "(w-tw)/2:(h-th)/2",
 }
 
+# Mapping from preset name to -cpu-used value for AV1 / VP9.
+# 0 = slowest/best quality, 8 = fastest.
+_PRESET_TO_CPU_USED = {
+    "ultrafast": 8,
+    "veryfast": 7,
+    "fast": 6,
+    "medium": 4,
+    "slow": 2,
+}
+
 
 def _with_suffix(path: str, suffix: str, ext: Optional[str] = None) -> str:
     """Return a sibling path with ``suffix`` appended to the stem."""
@@ -97,6 +107,23 @@ def _with_suffix(path: str, suffix: str, ext: Optional[str] = None) -> str:
     stem, original_ext = os.path.splitext(os.path.basename(path))
     new_ext = f".{ext.lstrip('.')}" if ext else original_ext
     return os.path.join(directory, f"{stem}{suffix}{new_ext}")
+
+
+def _speed_args(vcodec: str, preset: str) -> List[str]:
+    """Return the codec-appropriate speed/quality trade-off arguments.
+
+    libx264 and libx265 use ``-preset``; libaom-av1 and libvpx-vp9 use
+    ``-cpu-used`` (with ``-row-mt 1`` for VP9 to enable row-level
+    multi-threading).  Passing ``-preset`` to AV1/VP9 causes FFmpeg to error.
+    """
+    if vcodec in {"libx264", "libx265"}:
+        return ["-preset", preset]
+    cpu_used = str(_PRESET_TO_CPU_USED.get(preset, 4))
+    if vcodec == "libaom-av1":
+        return ["-cpu-used", cpu_used]
+    if vcodec == "libvpx-vp9":
+        return ["-cpu-used", cpu_used, "-row-mt", "1"]
+    return []
 
 
 # --------------------------------------------------------------------------- #
@@ -124,8 +151,7 @@ async def encode(
         vcodec,
         "-crf",
         str(crf),
-        "-preset",
-        preset,
+        *_speed_args(vcodec, preset),
         "-c:a",
         "copy",
         output,
